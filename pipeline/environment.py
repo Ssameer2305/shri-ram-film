@@ -61,6 +61,9 @@ def import_library(manifest):
         if zs:
             c["height"] = max(zs) - min(zs)
             c["radius"] = max(max(xs) - min(xs), max(ys) - min(ys)) / 2
+            if mid.startswith("island_tree"):
+                strip_island(new, min(zs) + 0.14 * c["height"])
+                c["zbase"] = min(zs) + 0.14 * c["height"]
         libs[mid] = c
         print("imported", mid, len(new), "objects", flush=True)
     bpy.context.view_layer.active_layer_collection = bpy.context.view_layer.layer_collection
@@ -68,10 +71,26 @@ def import_library(manifest):
     return libs
 
 
+def strip_island(objs, cut_z):
+    """Poly Haven 'island' trees stand on a lump of soil; remove it so the trunk meets our ground."""
+    import bmesh
+    for o in objs:
+        if o.type != "MESH":
+            continue
+        mw = o.matrix_world
+        bm = bmesh.new()
+        bm.from_mesh(o.data)
+        dead = [v for v in bm.verts if (mw @ v.co).z < cut_z]
+        bmesh.ops.delete(bm, geom=dead, context="VERTS")
+        bm.to_mesh(o.data)
+        bm.free()
+
+
 def instance(lib, loc, rot_z=0.0, scale=1.0, coll=None, tilt=0.0):
     e = bpy.data.objects.new(lib.name.replace("LIB_", "") + "_inst", None)
     e.instance_type = "COLLECTION"
     e.instance_collection = lib
+    loc = Vector(loc) - Vector((0, 0, lib.get("zbase", 0.0) * scale))
     e.location = loc
     e.rotation_euler = (random.uniform(-tilt, tilt), random.uniform(-tilt, tilt), rot_z)
     e.scale = (scale, scale, scale)
