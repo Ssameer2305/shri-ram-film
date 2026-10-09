@@ -64,7 +64,7 @@ def render_settings(scene, q):
             break
         except TypeError:
             continue
-    vs.exposure = 0.15
+    vs.exposure = 0.55
     r.image_settings.file_format = "PNG"
     r.image_settings.color_depth = "8"
     r.image_settings.compression = 30
@@ -84,7 +84,7 @@ def compositor(scene):
     haze.inputs[2].default_value = (0.95, 0.78, 0.55, 1)
     mistscale = nt.nodes.new("CompositorNodeMath")
     mistscale.operation = "MULTIPLY"
-    mistscale.inputs[1].default_value = 0.32
+    mistscale.inputs[1].default_value = 0.14
     nt.links.new(rl.outputs["Mist"], mistscale.inputs[0])
     nt.links.new(mistscale.outputs[0], haze.inputs[0])
     nt.links.new(rl.outputs["Image"], haze.inputs[1])
