@@ -18,7 +18,7 @@ import util
 MPFB_PKG = "bl_ext.user_default.mpfb"
 P = "mixamorig:"
 
-SKIN_TINT = (0.56, 0.65, 0.88)       # luminous blue-grey divine skin, per the reference sheet
+SKIN_TINT = (0.58, 0.68, 1.12)       # luminous blue-lavender divine skin, per the reference sheet
 SAFFRON = (0.93, 0.55, 0.07)
 VERMILION = (0.72, 0.12, 0.04)
 GOLD = (0.83, 0.58, 0.24)
@@ -120,9 +120,10 @@ def skin_material(data):
     m, nt, b = util.new_mat("M_ShriRam_Skin")
     tex = None
     if data:
-        cands = [f for f in glob.glob(os.path.join(data, "skins", "**", "*.png"), recursive=True)
-                 if "diffuse" in f.lower() and "female" not in f.lower()]
-        pref = [f for f in cands if "young" in f.lower()] or cands
+        cands = sorted(f for f in glob.glob(os.path.join(data, "skins", "**", "*.png"), recursive=True)
+                       if "diffuse" in f.lower() and "female" not in f.lower())
+        pref = ([f for f in cands if "light" in f.lower() and "young" in f.lower()]
+                or [f for f in cands if "light" in f.lower()] or cands)
         tex = pref[0] if pref else None
     tint = nt.nodes.new("ShaderNodeRGB")
     tint.outputs[0].default_value = (*SKIN_TINT, 1)
@@ -130,8 +131,8 @@ def skin_material(data):
         im = nt.nodes.new("ShaderNodeTexImage")
         im.image = bpy.data.images.load(tex)
         hs = nt.nodes.new("ShaderNodeHueSaturation")
-        hs.inputs["Saturation"].default_value = 0.15
-        hs.inputs["Value"].default_value = 1.35
+        hs.inputs["Saturation"].default_value = 0.0
+        hs.inputs["Value"].default_value = 1.05
         nt.links.new(im.outputs[0], hs.inputs["Color"])
         mix = nt.nodes.new("ShaderNodeMix")
         mix.data_type = "RGBA"
@@ -151,6 +152,26 @@ def skin_material(data):
     util.setp(b, "Coat Weight", 0.04)
     util.add_bump(nt, b, scale=1800.0, strength=0.05)
     return m
+
+
+def eye_material(data, eyes):
+    imgs = sorted(glob.glob(os.path.join(data, "eyes", "**", "*.png"), recursive=True))
+    pick = ([f for f in imgs if "brown" in os.path.basename(f).lower() and "light" not in os.path.basename(f).lower()]
+            or [f for f in imgs if "brown" in f.lower()] or imgs)
+    m, nt, b = util.new_mat("M_Eyes")
+    if pick:
+        im = nt.nodes.new("ShaderNodeTexImage")
+        im.image = bpy.data.images.load(pick[0])
+        nt.links.new(im.outputs[0], b.inputs["Base Color"])
+        print("eye texture", pick[0])
+    else:
+        util.setp(b, "Base Color", (0.12, 0.06, 0.03, 1))
+    util.setp(b, "Roughness", 0.3)
+    util.setp(b, "Coat Weight", 1.0)
+    util.setp(b, "Coat Roughness", 0.03)
+    util.setp(b, "Subsurface Weight", 0.1)
+    eyes.data.materials.clear()
+    eyes.data.materials.append(m)
 
 
 def fabric_material(name, color, border=None, gold_pattern=False):
@@ -340,87 +361,190 @@ def seg_dist_2d(px, pz, a, b):
 
 
 # ---------------------------------------------------------------- hair
-def build_hair(bs, R, coll, rig, mat, count=3200, seed=11):
+def hair_material():
+    m = bpy.data.materials.new("M_Hair")
+    m.use_nodes = True
+    nt = m.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    h = nt.nodes.new("ShaderNodeBsdfHairPrincipled")
+    try:
+        h.parametrization = "MELANIN"
+    except Exception:  # noqa: BLE001
+        pass
+    for k, v in (("Melanin", 0.88), ("Melanin Redness", 0.45), ("Roughness", 0.3),
+                 ("Radial Roughness", 0.35), ("Coat", 0.05), ("Random Roughness", 0.2), ("Random Color", 0.15)):
+        if k in h.inputs:
+            h.inputs[k].default_value = v
+    nt.links.new(h.outputs[0], out.inputs[0])
+    return m
+
+
+def build_hair(bs, R, coll, rig, n_guides=320, n_children=18000, seed=11):
+    """Guide strands grown over the scalp with gravity + collision, then clumped child strands."""
+    import bisect
     rnd = random.Random(seed)
     head_c = R["head_center"]
     rad = R["head_radius"]
-    scalp = []
+    scalp = set()
     for i in range(len(bs.co)):
-        if not bs.body_mask[i] or bs.w[i].get(P + "Head", 0) < 0.85:
+        if not bs.body_mask[i] or bs.w[i].get(P + "Head", 0) < 0.8:
             continue
         v = bs.co[i] - head_c
-        back = util.smoothstep(-0.06, 0.07, v.y)
-        zth = 0.045 * (1 - back) + (-0.085) * back
-        if abs(v.x) > 0.055 and abs(v.y) < 0.035 and -0.05 < v.z < 0.03:
+        back = util.smoothstep(-0.05, 0.06, v.y)
+        zth = 0.05 * (1 - back) + (-0.09) * back
+        if abs(v.x) > 0.055 and abs(v.y) < 0.035 and -0.06 < v.z < 0.03:
             continue  # ears
         if v.z > zth:
-            scalp.append(i)
-    print("scalp verts", len(scalp))
+            scalp.add(i)
+    tris = []
+    for p in bs.polys:
+        if all(i in scalp for i in p):
+            for k in range(1, len(p) - 1):
+                tris.append((p[0], p[k], p[k + 1]))
+    areas = []
+    acc = 0.0
+    for a, b, c in tris:
+        acc += ((bs.co[b] - bs.co[a]).cross(bs.co[c] - bs.co[a])).length / 2
+        areas.append(acc)
+    print("scalp verts", len(scalp), "tris", len(tris))
+
+    def sample():
+        t = tris[bisect.bisect_left(areas, rnd.uniform(0, acc))]
+        u, v = rnd.random(), rnd.random()
+        if u + v > 1:
+            u, v = 1 - u, 1 - v
+        w = 1 - u - v
+        p = bs.co[t[0]] * w + bs.co[t[1]] * u + bs.co[t[2]] * v
+        n = (bs.no[t[0]] * w + bs.no[t[1]] * u + bs.no[t[2]] * v).normalized()
+        return p, n
+
+    M = 30
+    bun_c = head_c + Vector((0, 0.045, rad * 0.95))
+
+    def resample(pts, m):
+        d = [0.0]
+        for a, b in zip(pts, pts[1:]):
+            d.append(d[-1] + (b - a).length)
+        out = []
+        for k in range(m):
+            s = d[-1] * k / (m - 1)
+            j = max(1, min(len(d) - 1, bisect.bisect_left(d, s)))
+            f = (s - d[j - 1]) / max(1e-9, d[j] - d[j - 1])
+            out.append(pts[j - 1].lerp(pts[j], f))
+        return out
+
+    def grow(root, n):
+        v = root - head_c
+        crown = v.z > rad * 0.55 and abs(v.x) < 0.07 and -0.07 < v.y < 0.07
+        if crown:
+            pts = [root]
+            for k in range(1, 12):
+                f = k / 11
+                pts.append(root.lerp(bun_c, f) + n * 0.012 * math.sin(f * math.pi))
+            return resample(pts, M), True
+        side = math.copysign(1.0, v.x) if abs(v.x) > 0.006 else rnd.choice((-1, 1))
+        d = Vector((side * 0.35, 0.6, -0.55))
+        d = (d - n * d.dot(n)).normalized()
+        lift = 0.004 + rnd.random() * 0.008
+        L = rnd.uniform(0.40, 0.52)
+        steps = 40
+        step = L / steps
+        p = root + n * lift
+        pts = [root, p]
+        for k in range(steps):
+            d = (d + Vector((0, 0.03, -0.30))).normalized()
+            q = p + d * step
+            c = q - head_c
+            if c.length < rad + lift:
+                q = head_c + c.normalized() * (rad + lift)
+            loc, nrm, _, dist = bs.bvh.find_nearest(q)
+            if loc is not None and dist < 0.02 and (q - loc).dot(nrm) < 0.014:
+                q = loc + nrm * 0.014
+            d = (q - p).normalized()
+            p = q
+            pts.append(p)
+        return resample(pts, M), False
+
+    guides = []
+    kd = KDTree(n_guides)
+    for g in range(n_guides):
+        root, n = sample()
+        pts, crown = grow(root, n)
+        phase = rnd.uniform(0, 6.28)
+        amp = rnd.uniform(0.006, 0.014)
+        guides.append((root, pts, crown, phase, amp))
+        kd.insert(root, g)
+    kd.balance()
+
     cu = bpy.data.curves.new("ShriRam_Hair", "CURVE")
     cu.dimensions = "3D"
-    cu.bevel_depth = 0.00085
-    cu.bevel_resolution = 0
-    bun_c = head_c + Vector((0, 0.035, rad * 0.98))
-    for s in range(count):
-        i = rnd.choice(scalp)
-        root = bs.co[i] + bs.no[i] * 0.0015
-        v = root - head_c
-        crown = (v.z > rad * 0.62 and abs(v.x) < 0.06 and v.y < 0.05)
-        pts = [root]
-        p = root.copy()
-        if crown:
-            # gathered up into the topknot
-            steps = 10
-            for k in range(1, steps + 1):
-                f = k / steps
-                q = root.lerp(bun_c, f) + (bs.no[i] * 0.01 * math.sin(f * math.pi))
-                pts.append(q)
-        else:
-            side = math.copysign(1.0, v.x) if abs(v.x) > 0.004 else rnd.choice((-1, 1))
-            d = (Vector((side * 0.5, 0.9, 0.15)) + bs.no[i] * 0.3).normalized()
-            length = rnd.uniform(0.34, 0.52)
-            step = 0.013
-            phase = rnd.uniform(0, 6.28)
-            nseg = int(length / step)
-            for k in range(nseg):
-                d = (d + Vector((0, 0.02, -0.16))).normalized()
-                q = p + d * step
-                c = q - head_c
-                if c.length < rad + 0.006:
-                    q = head_c + c.normalized() * (rad + 0.006)
-                loc, nrm, _, dist = bs.bvh.find_nearest(q)
-                if loc is not None and dist < 0.012:
-                    if (q - loc).dot(nrm) < 0.012:
-                        q = loc + nrm * 0.012
-                d = (q - p).normalized()
-                p = q
-                wave = 0.006 * (k / nseg) * math.sin(k * 0.55 + phase)
-                pts.append(p + Vector((wave, 0, 0)))
+    for c in range(n_children):
+        root, n = sample()
+        _, gi, _ = kd.find(root)
+        groot, gpts, crown, phase, amp = guides[gi]
+        off = root - groot
+        jit = Vector((rnd.gauss(0, 1), rnd.gauss(0, 1), rnd.gauss(0, 1))) * 0.004
+        pts = []
+        for k in range(M):
+            f = k / (M - 1)
+            clump = 0.0 if crown else 0.8 * f ** 0.7
+            p = gpts[k] + off * (1 - clump) + jit * f
+            if not crown:
+                side = Vector((1, 0, 0)) if abs(gpts[k].x) < 0.05 else Vector((0, 1, 0))
+                p += side * amp * f * math.sin(f * 14 + phase)
+            pts.append(p)
+        if not crown:
+            cut = int(M * rnd.uniform(0.82, 1.0))
+            pts = pts[:max(cut, 6)]
         sp = cu.splines.new("POLY")
         sp.points.add(len(pts) - 1)
         co = []
         for q in pts:
             co += [q.x, q.y, q.z, 1.0]
         sp.points.foreach_set("co", co)
-        sp.points.foreach_set("radius", [1.25 - 0.85 * (k / (len(pts) - 1)) for k in range(len(pts))])
     hair = bpy.data.objects.new("ShriRam_Hair", cu)
     coll.objects.link(hair)
+    mat = hair_material()
     hair.data.materials.append(mat)
+    converted = False
+    try:
+        for o in bpy.context.view_layer.objects:
+            o.select_set(False)
+        bpy.context.view_layer.objects.active = hair
+        hair.select_set(True)
+        bpy.ops.object.convert(target="CURVES")
+        hair = bpy.context.view_layer.objects.active
+        cv = hair.data
+        npts = len(cv.points)
+        if "radius" not in cv.attributes:
+            cv.attributes.new("radius", "FLOAT", "POINT")
+        radii = []
+        for crv in cv.curves:
+            m = crv.points_length
+            radii += [0.00022 - 0.00016 * (k / max(1, m - 1)) for k in range(m)]
+        cv.attributes["radius"].data.foreach_set("value", radii[:npts])
+        if not cv.materials:
+            cv.materials.append(mat)
+        converted = True
+        print("hair converted to Curves:", len(cv.curves), "strands")
+    except Exception as e:  # noqa: BLE001
+        print("!! hair conversion failed, using bevelled curves", e)
+    if not converted:
+        hair.data.bevel_depth = 0.0004
+        hair.data.bevel_resolution = 0
     parent_to_bone(hair, rig, P + "Head")
     # topknot bun + gold band
     mb = MB()
-    v, f = uv_sphere(bun_c, 0.05, 18, 10, (1.0, 0.9, 0.85))
+    v, f = uv_sphere(bun_c, 0.048, 18, 10, (1.0, 0.92, 0.8))
     mb.add(v, f, 0)
-    band = ring_points(bun_c + Vector((0, 0, -0.025)), Vector((0, 0.2, 1)), 0.047, 24)
-    tv, tf = util.tube_geometry(band + [band[0]], [0.006] * 25, 6, closed_ends=False)
+    band = ring_points(bun_c + Vector((0, 0, -0.022)), Vector((0, 0.25, 1)), 0.046, 24)
+    tv, tf = util.tube_geometry(band + [band[0]], [0.0055] * 25, 6, closed_ends=False)
     mb.add(tv, tf, 1)
-    bun = mb.build("ShriRam_Topknot", [mat, util.simple_mat("M_GoldBand", GOLD, 0.3, 1.0)], coll)
-    sw = bun.modifiers.new("Strands", "DISPLACE")
-    t = bpy.data.textures.new("BunStrands", "WOOD")
-    t.wood_type = "BANDNOISE"
-    t.noise_scale = 0.02
-    sw.texture = t
-    sw.strength = 0.004
+    bun_mat = util.simple_mat("M_HairBun", (0.03, 0.018, 0.012), 0.38, sheen=0.4)
+    util.add_bump(bun_mat.node_tree, bun_mat.node_tree.nodes["Principled BSDF"], 220.0, 0.6, kind="wave")
+    bun = mb.build("ShriRam_Topknot", [bun_mat, util.simple_mat("M_GoldBand", GOLD, 0.3, 1.0)], coll)
     parent_to_bone(bun, rig, P + "Head")
     return hair, bun
 
@@ -808,8 +932,9 @@ def build(manifest, coll_name="SHRI_RAM"):
     cloth_from_body(bs, "QuiverStrap", lambda i: torso(i) and seg_dist_2d(bs.co[i].x, bs.co[i].z, s1, s2)[0] < 0.024,
                     lambda i: 0.024, strap, rig, coll, fold=0.0)
 
-    hair_mat = util.simple_mat("M_Hair", (0.022, 0.014, 0.01), 0.36, sheen=0.4)
-    build_hair(bs, R, coll, rig, hair_mat)
+    build_hair(bs, R, coll, rig)
+    if eyes is not None:
+        eye_material(data, eyes)
     build_tilak(bs, R, rig, coll)
     build_ornaments(bs, R, rig, coll)
     bow, string = build_bow(coll)
