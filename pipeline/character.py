@@ -18,8 +18,8 @@ import util
 MPFB_PKG = "bl_ext.user_default.mpfb"
 P = "mixamorig:"
 
-SKIN_TINT = (0.58, 0.68, 1.12)       # luminous blue-lavender divine skin, per the reference sheet
-SAFFRON = (0.93, 0.55, 0.07)
+SKIN_TINT = (0.50, 0.60, 1.10)       # luminous blue-lavender divine skin, per the reference sheet
+SAFFRON = (0.9, 0.42, 0.03)
 VERMILION = (0.72, 0.12, 0.04)
 GOLD = (0.83, 0.58, 0.24)
 LEATHER = (0.23, 0.12, 0.05)
@@ -132,7 +132,7 @@ def skin_material(data):
         im.image = bpy.data.images.load(tex)
         hs = nt.nodes.new("ShaderNodeHueSaturation")
         hs.inputs["Saturation"].default_value = 0.0
-        hs.inputs["Value"].default_value = 1.05
+        hs.inputs["Value"].default_value = 0.95
         nt.links.new(im.outputs[0], hs.inputs["Color"])
         mix = nt.nodes.new("ShaderNodeMix")
         mix.data_type = "RGBA"
@@ -152,6 +152,26 @@ def skin_material(data):
     util.setp(b, "Coat Weight", 0.04)
     util.add_bump(nt, b, scale=1800.0, strength=0.05)
     return m
+
+
+def procedural_eyes(eyes):
+    """MPFB procedural eyes: set a warm dark-brown iris. Returns False if not procedural."""
+    recolored, procedural = False, False
+    for slot in eyes.material_slots:
+        m = slot.material
+        if not m or not m.use_nodes:
+            continue
+        trees = [m.node_tree] + [n.node_tree for n in m.node_tree.nodes if n.type == "GROUP" and n.node_tree]
+        procedural = procedural or not any(n.type == "TEX_IMAGE" for nt in trees for n in nt.nodes)
+        for nt in trees:
+            for n in nt.nodes:
+                for inp in n.inputs:
+                    nm = inp.name.lower()
+                    if "iris" in nm and "color" in nm and inp.type == "RGBA":
+                        inp.default_value = (0.16, 0.075, 0.03, 1) if "minor" in nm else (0.085, 0.04, 0.018, 1)
+                        recolored = True
+    print("procedural eyes:", procedural, "iris recolored:", recolored)
+    return procedural
 
 
 def eye_material(data, eyes):
@@ -178,7 +198,7 @@ def fabric_material(name, color, border=None, gold_pattern=False):
     m, nt, b = util.new_mat(name)
     util.setp(b, "Base Color", (*color, 1))
     util.setp(b, "Roughness", 0.78)
-    util.setp(b, "Sheen Weight", 0.6)
+    util.setp(b, "Sheen Weight", 0.22)
     util.setp(b, "Sheen Tint", (1.0, 0.9, 0.7, 1))
     util.setp(b, "Subsurface Weight", 0.08)
     util.setp(b, "Specular IOR Level", 0.3)
@@ -325,7 +345,7 @@ def rig_mesh(obj, rig, weights_per_vert):
     return obj
 
 
-def cloth_from_body(bs, name, select, offset, mat, rig, coll, fold=0.006, sub=1):
+def cloth_from_body(bs, name, select, offset, mat, rig, coll, fold=0.006, sub=1, fold_scale=0.06):
     keep = [i for i in range(len(bs.co)) if bs.body_mask[i] and select(i)]
     remap = {old: new for new, old in enumerate(keep)}
     faces = [tuple(remap[i] for i in p) for p in bs.polys if all(i in remap for i in p)]
@@ -333,15 +353,17 @@ def cloth_from_body(bs, name, select, offset, mat, rig, coll, fold=0.006, sub=1)
     obj = util.mesh_object(name, verts, faces, coll)
     obj.data.materials.append(mat)
     weights = [{k: v for k, v in bs.w[i].items() if k.startswith(P)} for i in keep]
-    rig_mesh(obj, rig, weights)
     if fold > 0:
+        # folds are displaced in rest space (before the armature) so they don't swim during motion
         d = obj.modifiers.new("Folds", "DISPLACE")
         t = bpy.data.textures.new(name + "_folds", "CLOUDS")
-        t.noise_scale = 0.06
+        t.noise_scale = fold_scale
         t.noise_depth = 2
         d.texture = t
         d.strength = fold
+        d.mid_level = 0.5
         d.texture_coords = "LOCAL"
+    rig_mesh(obj, rig, weights)
     s = obj.modifiers.new("Subsurf", "SUBSURF")
     s.levels, s.render_levels = 0, sub
     so = obj.modifiers.new("Thickness", "SOLIDIFY")
@@ -381,7 +403,7 @@ def hair_material():
     return m
 
 
-def build_hair(bs, R, coll, rig, n_guides=320, n_children=18000, seed=11):
+def build_hair(bs, R, coll, rig, n_guides=360, n_children=26000, seed=11):
     """Guide strands grown over the scalp with gravity + collision, then clumped child strands."""
     import bisect
     rnd = random.Random(seed)
@@ -398,6 +420,7 @@ def build_hair(bs, R, coll, rig, n_guides=320, n_children=18000, seed=11):
             continue  # ears
         if v.z > zth:
             scalp.add(i)
+    R["scalp"] = scalp
     tris = []
     for p in bs.polys:
         if all(i in scalp for i in p):
@@ -439,13 +462,23 @@ def build_hair(bs, R, coll, rig, n_guides=320, n_children=18000, seed=11):
         v = root - head_c
         crown = v.z > rad * 0.55 and abs(v.x) < 0.07 and -0.07 < v.y < 0.07
         if crown:
+            # combed up along the scalp into the topknot
+            a = (root - head_c).normalized()
+            b = (bun_c - head_c).normalized()
+            lift = 0.003 + rnd.random() * 0.004
             pts = [root]
-            for k in range(1, 12):
-                f = k / 11
-                pts.append(root.lerp(bun_c, f) + n * 0.012 * math.sin(f * math.pi))
+            for k in range(1, 14):
+                f = k / 13
+                dirv = a.slerp(b, f) if a.dot(b) < 0.9999 else a
+                q = head_c + dirv * (rad + lift)
+                loc, nrm, _, dist = bs.bvh.find_nearest(q)
+                if loc is not None and (q - loc).dot(nrm) < 0.004:
+                    q = loc + nrm * (0.004 + lift)
+                pts.append(q)
+            pts.append(bun_c)
             return resample(pts, M), True
         side = math.copysign(1.0, v.x) if abs(v.x) > 0.006 else rnd.choice((-1, 1))
-        d = Vector((side * 0.35, 0.6, -0.55))
+        d = Vector((side * 0.22, 0.85, -0.45))
         d = (d - n * d.dot(n)).normalized()
         lift = 0.004 + rnd.random() * 0.008
         L = rnd.uniform(0.40, 0.52)
@@ -799,15 +832,25 @@ def build_ornaments(bs, R, rig, coll):
             for k in range(24):
                 a = 2 * math.pi * k / 24
                 outline.append(Vector((cx + hx * math.cos(a), cy + hy * math.sin(a), 0)))
-            top = [p + Vector((0, 0, gz + 0.012)) for p in outline]
-            bot = [p + Vector((0, 0, gz - 0.004)) for p in outline]
+            top = [p + Vector((0, 0, gz + 0.003)) for p in outline]
+            bot = [p + Vector((0, 0, gz - 0.013)) for p in outline]
             verts = top + bot
-            faces = [tuple(range(24))[::-1], tuple(range(24, 48))]
-            faces += [(k, (k + 1) % 24, 24 + (k + 1) % 24, 24 + k) for k in range(24)]
+            faces = [tuple(range(24)), tuple(range(24, 48))[::-1]]
+            faces += [(k, 24 + k, 24 + (k + 1) % 24, (k + 1) % 24) for k in range(24)]
             mb.add(verts, faces, 0)
-            for fy, fz in ((miny + 0.035, 0.035), (cy + 0.02, 0.06), (maxy - 0.03, 0.075)):
-                ring = ring_points(Vector((cx, fy, gz + fz)), Vector((0, 1, 0.15)), max(hx, 0.045) * 0.95, 16)
-                tv, tf = util.tube_geometry(ring + [ring[0]], [0.0045] * 17, 5, closed_ends=False)
+            # straps hug the real foot cross-section at three points along its length
+            for frac, zmax in ((0.22, 0.09), (0.5, 0.14), (0.86, 0.16)):
+                fy = miny + (maxy - miny) * frac
+                sl = [v for v in foot_vs if abs(v.y - fy) < 0.012 and v.z < gz + zmax]
+                if len(sl) < 4:
+                    continue
+                x0, x1 = min(v.x for v in sl), max(v.x for v in sl)
+                z1 = max(v.z for v in sl)
+                ecx, ecz = (x0 + x1) / 2, (gz + z1) / 2
+                ax, az = (x1 - x0) / 2 + 0.006, (z1 - gz) / 2 + 0.006
+                angs = [-0.25 + (math.pi + 0.5) * k / 15 for k in range(16)]   # arc over the top of the foot
+                ring = [Vector((ecx + ax * math.cos(a), fy, max(gz - 0.004, ecz + az * math.sin(a)))) for a in angs]
+                tv, tf = util.tube_geometry(ring, [0.0042] * len(ring), 5, closed_ends=True)
                 mb.add(tv, tf, 1)
             sandal = mb.build(f"Sandal_{side}", [util.simple_mat("M_SandalSole", (0.2, 0.1, 0.04), 0.7),
                                                  util.simple_mat("M_SandalStrap", LEATHER, 0.5)], coll)
@@ -846,8 +889,8 @@ def build(manifest, coll_name="SHRI_RAM"):
     bpy.context.scene.collection.children.link(coll)
     HS = mpfb_services()
     data = install_system_assets(manifest["mpfb_assets"])
-    macro = {"gender": 1.0, "age": 0.5, "muscle": 0.72, "weight": 0.48, "proportions": 0.9,
-             "height": 0.62, "cupsize": 0.5, "firmness": 0.5,
+    macro = {"gender": 1.0, "age": 0.52, "muscle": 0.92, "weight": 0.56, "proportions": 1.0,
+             "height": 0.7, "cupsize": 0.5, "firmness": 0.5,
              "race": {"asian": 0.55, "caucasian": 0.35, "african": 0.10}}
     body = HS.create_human(macro_detail_dict=macro)
     body.name = "ShriRam_Body"
@@ -863,7 +906,12 @@ def build(manifest, coll_name="SHRI_RAM"):
             print("!! no asset for", sub)
             continue
         try:
-            o = HS.add_mhclo_asset(f, body, asset_type=sub, subdiv_levels=0, material_type="MAKESKIN")
+            mtype = "PROCEDURAL_EYES" if sub == "eyes" else "MAKESKIN"
+            try:
+                o = HS.add_mhclo_asset(f, body, asset_type=sub, subdiv_levels=0, material_type=mtype)
+            except Exception as e:  # noqa: BLE001
+                print("!! retry", sub, "with MAKESKIN:", e)
+                o = HS.add_mhclo_asset(f, body, asset_type=sub, subdiv_levels=0, material_type="MAKESKIN")
             print("added", sub, os.path.basename(f))
             if sub == "eyes":
                 eyes = o
@@ -893,22 +941,25 @@ def build(manifest, coll_name="SHRI_RAM"):
     arms = ("Arm", "ForeArm", "Hand")
 
     saffron = fabric_material("M_Dhoti", SAFFRON)
-    uttariya = fabric_material("M_Uttariya", (0.95, 0.62, 0.12))
+    uttariya = fabric_material("M_Uttariya", (0.95, 0.55, 0.05))
     border = fabric_material("M_Border", VERMILION, gold_pattern=True)
-    sash = fabric_material("M_Kamarband", (0.78, 0.2, 0.05), gold_pattern=True)
+    sash = fabric_material("M_Kamarband", (0.55, 0.06, 0.02), gold_pattern=True)
     strap = carved_material("M_Strap", (0.3, 0.16, 0.07), True, 70.0)
 
     def dhoti_sel(i):
         z = bs.co[i].z
-        return ankle_z + 0.035 < z < waist_z + 0.02 and bs.wsum(i, arms) < 0.15
+        return ankle_z + 0.03 < z < waist_z and bs.wsum(i, arms) < 0.15
 
     def dhoti_off(i):
         z = bs.co[i].z
-        return 0.02 + 0.045 * util.smoothstep(knee_z + 0.15, ankle_z + 0.05, z) + 0.012 * util.smoothstep(knee_z, waist_z, z)
+        mid_calf = (knee_z + ankle_z) / 2
+        return (0.025 + 0.045 * util.smoothstep(waist_z, knee_z + 0.1, z)
+                + 0.03 * util.smoothstep(knee_z, mid_calf, z)
+                - 0.055 * util.smoothstep(ankle_z + 0.13, ankle_z + 0.04, z))
 
-    cloth_from_body(bs, "Dhoti", dhoti_sel, dhoti_off, saffron, rig, coll, fold=0.012)
-    cloth_from_body(bs, "Kamarband", lambda i: waist_z - 0.07 < bs.co[i].z < waist_z + 0.04 and bs.wsum(i, arms) < 0.15,
-                    lambda i: 0.05, sash, rig, coll, fold=0.006)
+    cloth_from_body(bs, "Dhoti", dhoti_sel, dhoti_off, saffron, rig, coll, fold=0.022, fold_scale=0.11)
+    cloth_from_body(bs, "Kamarband", lambda i: waist_z - 0.07 < bs.co[i].z < waist_z + 0.035 and bs.wsum(i, arms) < 0.15,
+                    lambda i: 0.055, sash, rig, coll, fold=0.008)
 
     p1 = (lsh.x - 0.02, lsh.z + 0.07)
     p2 = (rhip.x - 0.05, waist_z - 0.05)
@@ -919,11 +970,11 @@ def build(manifest, coll_name="SHRI_RAM"):
 
     def utt_sel(i):
         d, _ = seg_dist_2d(bs.co[i].x, bs.co[i].z, p1, p2)
-        return torso(i) and d < 0.15
+        return torso(i) and d < 0.085
 
     def border_sel(i):
         d, side = seg_dist_2d(bs.co[i].x, bs.co[i].z, p1, p2)
-        return torso(i) and 0.115 < d < 0.165 and side < 0
+        return torso(i) and 0.06 < d < 0.1 and side < 0
 
     cloth_from_body(bs, "Uttariya", utt_sel, lambda i: 0.013, uttariya, rig, coll, fold=0.005)
     cloth_from_body(bs, "Uttariya_Border", border_sel, lambda i: 0.017, border, rig, coll, fold=0.005)
@@ -933,7 +984,10 @@ def build(manifest, coll_name="SHRI_RAM"):
                     lambda i: 0.024, strap, rig, coll, fold=0.0)
 
     build_hair(bs, R, coll, rig)
-    if eyes is not None:
+    cap_mat = util.simple_mat("M_HairCap", (0.028, 0.017, 0.011), 0.42, sheen=0.3)
+    util.add_bump(cap_mat.node_tree, cap_mat.node_tree.nodes["Principled BSDF"], 300.0, 0.5, kind="wave")
+    cloth_from_body(bs, "HairCap", lambda i: i in R["scalp"], lambda i: 0.0025, cap_mat, rig, coll, fold=0.0)
+    if eyes is not None and not procedural_eyes(eyes):
         eye_material(data, eyes)
     build_tilak(bs, R, rig, coll)
     build_ornaments(bs, R, rig, coll)
