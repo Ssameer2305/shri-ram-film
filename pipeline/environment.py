@@ -118,9 +118,9 @@ def giant_tree(name, base, radius, height, coll, bark_mat, seed):
         zs.append(z)
         for s in range(seg):
             th = 2 * math.pi * s / seg
-            flare = 1.0 + 1.9 * math.exp(-max(z, 0) / 1.4)
-            butt = 1.0 + 0.85 * math.exp(-max(z, 0) / 2.2) * max(0.0, math.cos(lobes * th + phase)) ** 3
-            taper = 1.0 - 0.45 * t
+            flare = 1.0 + 0.9 * math.exp(-max(z, 0) / 1.1)
+            butt = 1.0 + 0.55 * math.exp(-max(z, 0) / 1.6) * max(0.0, math.cos(lobes * th + phase)) ** 3
+            taper = 1.0 - 0.5 * t
             n = noise.noise(Vector((math.cos(th) * 1.3, math.sin(th) * 1.3, z * 0.35 + seed)))
             rr = radius * flare * butt * taper * (1 + 0.12 * n)
             off = lean * z
@@ -241,7 +241,7 @@ def build_world(manifest):
     nt.links.new(tc.outputs["Generated"], mp.inputs[0])
     nt.links.new(mp.outputs[0], env.inputs[0])
     nt.links.new(env.outputs[0], bg.inputs[0])
-    bg.inputs["Strength"].default_value = 0.55
+    bg.inputs["Strength"].default_value = 1.1
     nt.links.new(bg.outputs[0], out.inputs["Surface"])
     w.mist_settings.start = 4.0
     w.mist_settings.depth = 70.0
@@ -251,7 +251,7 @@ def build_world(manifest):
 
 def build_sun():
     sd = bpy.data.lights.new("Sun", "SUN")
-    sd.energy = 7.5
+    sd.energy = 11.0
     sd.angle = math.radians(0.6)
     sd.color = (1.0, 0.82, 0.62)
     s = bpy.data.objects.new("Sun", sd)
@@ -277,7 +277,7 @@ def build_haze(coll, quality):
         nt.nodes.remove(n)
     out = nt.nodes.new("ShaderNodeOutputMaterial")
     pv = nt.nodes.new("ShaderNodeVolumePrincipled")
-    pv.inputs["Density"].default_value = 0.010 if quality == "final" else 0.008
+    pv.inputs["Density"].default_value = 0.0032 if quality == "final" else 0.0028
     pv.inputs["Anisotropy"].default_value = 0.65
     pv.inputs["Color"].default_value = (1.0, 0.93, 0.82, 1)
     # density falls off with height, plus slow noise
@@ -353,32 +353,38 @@ def build(manifest, quality):
         util.simple_mat("M_GiantBark", (0.2, 0.15, 0.1), 0.9)
     giants = []
     hx = trail_x(HERO_Y)
+    # (x, y, trunk radius). Footprint of a trunk incl. buttresses is ~3x its radius.
     specs = [
         # hero framing pair (behind him in S10; he faces +X)
-        (hx - 4.2, HERO_Y + 2.6, 2.3), (hx - 3.6, HERO_Y - 3.4, 1.9),
+        (hx - 7.0, HERO_Y + 3.2, 1.5), (hx - 6.2, HERO_Y - 4.0, 1.3),
     ]
-    for y in range(-48, 46, 7):
-        side = 1 if (y // 7) % 2 == 0 else -1
-        specs.append((trail_x(y) + side * rnd.uniform(4.0, 7.5), y + rnd.uniform(-2, 2), rnd.uniform(1.2, 2.4)))
-        if rnd.random() < 0.55:
-            specs.append((trail_x(y) - side * rnd.uniform(6.0, 11.0), y + rnd.uniform(-2, 2), rnd.uniform(1.0, 2.0)))
-    for i in range(14):
+    for y in range(-48, 46, 8):
+        side = 1 if (y // 8) % 2 == 0 else -1
+        r = rnd.uniform(0.9, 1.5)
+        specs.append((trail_x(y) + side * (3 * r + rnd.uniform(2.2, 5.0)), y + rnd.uniform(-2, 2), r))
+        if rnd.random() < 0.5:
+            r = rnd.uniform(0.8, 1.3)
+            specs.append((trail_x(y) - side * (3 * r + rnd.uniform(4.0, 9.0)), y + rnd.uniform(-2, 2), r))
+    for i in range(16):
         y = rnd.uniform(-60, 60)
-        specs.append((trail_x(y) + rnd.choice((-1, 1)) * rnd.uniform(14, 35), y, rnd.uniform(1.5, 2.8)))
+        specs.append((trail_x(y) + rnd.choice((-1, 1)) * rnd.uniform(16, 38), y, rnd.uniform(1.1, 1.8)))
+    crowns = [libs[n] for n in ("island_tree_01", "island_tree_02", "island_tree_03") if n in libs]
     for i, (x, y, r) in enumerate(specs):
-        if abs(x - trail_x(y)) < 3.0:
-            x = trail_x(y) + math.copysign(3.2, x - trail_x(y) or 1)
+        if abs(x - trail_x(y)) < 3 * r + 2.0:
+            x = trail_x(y) + math.copysign(3 * r + 2.0, x - trail_x(y) or 1)
         base = Vector((x, y, terrain_h(x, y)))
-        o = giant_tree(f"GiantTree_{i:02d}", base, r, rnd.uniform(34, 48), env, bark, i)
+        height = rnd.uniform(26, 34)
+        o = giant_tree(f"GiantTree_{i:02d}", base, r, height, env, bark, i)
         o["base"] = tuple(base)
+        o["radius"] = r
         giants.append(o)
-        # crown: big Poly Haven trees lifted onto the giant trunks
-        crowns = [libs[n] for n in ("island_tree_01", "island_tree_02", "island_tree_03") if n in libs]
-        if crowns:
-            lib = crowns[i % len(crowns)]
-            h = lib.get("height", 10.0)
-            s = 26.0 / max(h, 1.0)
-            instance(lib, (x, y, base.z + 8.0), rnd.uniform(0, 6.28), s, env)
+        # crown: a cluster of Poly Haven trees forming the canopy at the top of each trunk
+        for k in range(3 if crowns else 0):
+            lib = crowns[(i + k) % len(crowns)]
+            s = 13.0 / max(lib.get("height", 10.0), 1.0)
+            a = rnd.uniform(0, 6.28)
+            off = Vector((math.cos(a), math.sin(a), 0)) * r * 0.8
+            instance(lib, base + off + Vector((0, 0, height * 0.62)), rnd.uniform(0, 6.28), s, env, 0.15)
 
     vine_mat = util.simple_mat("M_Vine", (0.09, 0.11, 0.05), 0.8)
     hanging_vines(giants, env, vine_mat)
