@@ -18,7 +18,7 @@ import util
 MPFB_PKG = "bl_ext.user_default.mpfb"
 P = "mixamorig:"
 
-SKIN_TINT = (0.50, 0.60, 1.10)       # luminous blue-lavender divine skin, per the reference sheet
+SKIN_TINT = (0.42, 0.53, 1.12)       # luminous blue-lavender divine skin, per the reference sheet
 SAFFRON = (0.9, 0.42, 0.03)
 VERMILION = (0.72, 0.12, 0.04)
 GOLD = (0.83, 0.58, 0.24)
@@ -168,7 +168,7 @@ def procedural_eyes(eyes):
                 for inp in n.inputs:
                     nm = inp.name.lower()
                     if "iris" in nm and "color" in nm and inp.type == "RGBA":
-                        inp.default_value = (0.16, 0.075, 0.03, 1) if "minor" in nm else (0.085, 0.04, 0.018, 1)
+                        inp.default_value = (0.42, 0.24, 0.1, 1) if "minor" in nm else (0.26, 0.13, 0.05, 1)
                         recolored = True
     print("procedural eyes:", procedural, "iris recolored:", recolored)
     return procedural
@@ -764,8 +764,8 @@ def build_ornaments(bs, R, rig, coll):
     mb = MB()
     neck = B[P + "Neck"]["head"]
     pts = []
-    for k in range(64):
-        a = 2 * math.pi * k / 64
+    for k in range(92):
+        a = 2 * math.pi * k / 92
         depth = 0.5 - 0.5 * math.cos(a)          # 0 at back, 1 at front
         p = neck + Vector((0.085 * math.sin(a), 0.07 * math.cos(a) - 0.01, -0.03 - 0.17 * depth ** 2.2))
         loc, nrm, _, _ = bs.bvh.find_nearest(p)
@@ -773,7 +773,7 @@ def build_ornaments(bs, R, rig, coll):
             p = loc + nrm * 0.0085
         pts.append(p)
     for p in pts:
-        v, f = uv_sphere(p, 0.0075, 8, 5)
+        v, f = uv_sphere(p, 0.0064, 8, 5)
         mb.add(v, f, 0)
     mala = mb.build("Rudraksha_Mala", [wood], coll)
     parent_to_bone(mala, rig, P + "Spine2")
@@ -821,6 +821,7 @@ def build_ornaments(bs, R, rig, coll):
         # sandals
         foot_vs = [bs.co[i] for i in range(len(bs.co)) if bs.body_mask[i] and
                    (bs.w[i].get(P + side + "Foot", 0) + bs.w[i].get(P + side + "ToeBase", 0)) > 0.6]
+        print("sandal", side, "foot verts", len(foot_vs))
         if foot_vs:
             minx, maxx = min(v.x for v in foot_vs), max(v.x for v in foot_vs)
             miny, maxy = min(v.y for v in foot_vs), max(v.y for v in foot_vs)
@@ -950,14 +951,31 @@ def build(manifest, coll_name="SHRI_RAM"):
         z = bs.co[i].z
         return ankle_z + 0.03 < z < waist_z and bs.wsum(i, arms) < 0.15
 
-    def dhoti_off(i):
-        z = bs.co[i].z
-        mid_calf = (knee_z + ankle_z) / 2
-        return (0.025 + 0.045 * util.smoothstep(waist_z, knee_z + 0.1, z)
-                + 0.03 * util.smoothstep(knee_z, mid_calf, z)
-                - 0.055 * util.smoothstep(ankle_z + 0.13, ankle_z + 0.04, z))
+    from mathutils import noise as mnoise
+    legs = {}
+    for side in ("Left", "Right"):
+        a = B[P + side + "UpLeg"]["head"]
+        b = B[P + side + "Foot"]["head"]
+        ax = (b - a).normalized()
+        e1 = (Vector((1, 0, 0)) - ax * ax.x).normalized()
+        legs[side] = (a, ax, e1, ax.cross(e1))
 
-    cloth_from_body(bs, "Dhoti", dhoti_sel, dhoti_off, saffron, rig, coll, fold=0.022, fold_scale=0.11)
+    def dhoti_off(i):
+        p = bs.co[i]
+        z = p.z
+        mid_calf = (knee_z + ankle_z) / 2
+        base = (0.022 + 0.028 * util.smoothstep(waist_z, knee_z + 0.1, z)
+                + 0.02 * util.smoothstep(knee_z, mid_calf, z)
+                - 0.04 * util.smoothstep(ankle_z + 0.13, ankle_z + 0.04, z))
+        a, ax, e1, e2 = legs["Left" if p.x > 0 else "Right"]
+        r = p - (a + ax * (p - a).dot(ax))
+        th = math.atan2(r.dot(e2), r.dot(e1))
+        n = mnoise.noise(p * 9.0)
+        drape = 0.013 * math.sin(6 * th + 2.6 * n) * util.smoothstep(waist_z - 0.05, knee_z, z)
+        gather = 0.006 * math.sin(z * 140 + 3 * n) * util.smoothstep(ankle_z + 0.2, ankle_z + 0.05, z)
+        return max(0.008, base + drape + gather)
+
+    cloth_from_body(bs, "Dhoti", dhoti_sel, dhoti_off, saffron, rig, coll, fold=0.008, fold_scale=0.08)
     cloth_from_body(bs, "Kamarband", lambda i: waist_z - 0.07 < bs.co[i].z < waist_z + 0.035 and bs.wsum(i, arms) < 0.15,
                     lambda i: 0.055, sash, rig, coll, fold=0.008)
 
