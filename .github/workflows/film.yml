@@ -1,0 +1,171 @@
+name: Shri Ram Film
+
+on:
+  workflow_dispatch:
+    inputs:
+      quality:
+        description: "preview (1280x536, fast) or final (1920x804, high quality)"
+        type: choice
+        options: [preview, final]
+        default: preview
+      shards:
+        description: "Number of parallel render machines"
+        default: "24"
+      render_movie:
+        description: "Render the full 60 s film (untick = build scene + one still per shot only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  BLENDER_VER: "4.2.3"
+  BLENDER_DIR: blender-4.2.3-linux-x64
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libxi6 libxkbcommon0 libsm6 libgl1 libegl1 libxrender1 libxxf86vm1 libxfixes3
+      - uses: actions/cache@v4
+        with:
+          path: blender
+          key: blender-${{ env.BLENDER_VER }}
+      - name: Blender
+        run: |
+          if [ ! -x blender/blender ]; then
+            curl -fsSL "https://download.blender.org/release/Blender4.2/${BLENDER_DIR}.tar.xz" | tar -xJ
+            mv "${BLENDER_DIR}" blender
+          fi
+          blender/blender --version
+      - uses: actions/cache@v4
+        with:
+          path: assets
+          key: assets-v1-${{ inputs.quality }}
+      - name: Download assets (Poly Haven CC0, MPFB)
+        run: python3 pipeline/fetch_assets.py assets ${{ inputs.quality == 'final' && '2k' || '1k' }}
+      - name: Install MPFB extension
+        run: blender/blender -b --command extension install-file -r user_default -e assets/mpfb/mpfb.zip
+      - name: Build scene (environment, character, animation, cameras, lighting, compositing)
+        run: blender/blender -b --python pipeline/build_scene.py -- --assets assets --out project/shri_ram_intro.blend --quality ${{ inputs.quality }}
+      - name: Render one still per shot
+        run: blender/blender -b project/shri_ram_intro.blend --python pipeline/render_shard.py -- --stills --out stills --samples 16
+      - uses: actions/upload-artifact@v4
+        with:
+          name: project
+          path: project/
+          retention-days: 7
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stills
+          path: stills/
+          retention-days: 14
+      - id: m
+        run: python3 -c "import json;print('matrix='+json.dumps(list(range(int('${{ inputs.shards }}')))))" >> "$GITHUB_OUTPUT"
+
+  render:
+    needs: build
+    if: ${{ inputs.render_movie }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJSON(needs.build.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libxi6 libxkbcommon0 libsm6 libgl1 libegl1 libxrender1 libxxf86vm1 libxfixes3 ffmpeg
+      - uses: actions/cache@v4
+        with:
+          path: blender
+          key: blender-${{ env.BLENDER_VER }}
+      - name: Blender
+        run: |
+          if [ ! -x blender/blender ]; then
+            curl -fsSL "https://download.blender.org/release/Blender4.2/${BLENDER_DIR}.tar.xz" | tar -xJ
+            mv "${BLENDER_DIR}" blender
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          name: project
+          path: project
+      - name: Render frames
+        run: blender/blender -b project/shri_ram_intro.blend --python pipeline/render_shard.py -- --shard ${{ matrix.shard }} --shards ${{ inputs.shards }} --out frames
+      - name: Encode segment
+        run: |
+          read f0 f1 < frames/range.txt
+          mkdir -p seg
+          ffmpeg -y -v error -framerate 24 -start_number "$f0" -i frames/frame_%04d.png -frames:v $((f1-f0+1)) \
+            -c:v libx264 -preset slow -crf 10 -pix_fmt yuv420p "seg/seg_$(printf %03d ${{ matrix.shard }}).mp4"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seg-${{ matrix.shard }}
+          path: seg/
+          retention-days: 7
+          compression-level: 0
+
+  score:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install -q numpy scipy
+      - run: python3 pipeline/score.py score.wav
+      - uses: actions/upload-artifact@v4
+        with:
+          name: score
+          path: score.wav
+
+  assemble:
+    needs: [build, render, score]
+    if: ${{ inputs.render_movie }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: seg-*
+          path: seg
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: score
+          path: audio
+      - uses: actions/download-artifact@v4
+        with:
+          name: project
+          path: project
+      - uses: actions/download-artifact@v4
+        with:
+          name: stills
+          path: stills
+      - name: Assemble film
+        run: |
+          curl -fsSL -o Cinzel.ttf "https://github.com/google/fonts/raw/main/ofl/cinzel/Cinzel%5Bwght%5D.ttf"
+          mkdir -p film
+          bash pipeline/assemble.sh seg audio/score.wav Cinzel.ttf "film/ShriRam_Intro_60s_${{ inputs.quality }}.mp4"
+          cp audio/score.wav film/ShriRam_Intro_score.wav
+          (cd stills && zip -q ../film/shot_stills.zip *.png)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: film-${{ inputs.quality }}
+          path: film/
+          retention-days: 30
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="film-${{ inputs.quality }}-${{ github.run_number }}"
+          gh release create "$TAG" film/* project/shri_ram_intro.blend \
+            --title "Shri Ram - Cinematic Intro (${{ inputs.quality }}, run ${{ github.run_number }})" \
+            --notes "60 s, 24 fps, 2.39:1, with original score. Includes the editable Blender project and per-shot stills."
