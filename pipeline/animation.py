@@ -542,9 +542,10 @@ def build(char, env, scene):
                 if arrow is not None:
                     st["arrow"] = arrow
                     st["nocked_vis"] = True
-            cp = M @ Vector((-0.62 + 0.08 * ease(t / 7.0), 0.95, 1.72))
-            tgt = M @ Vector((0.5, -0.55, 1.25))
-            st.update(cam=cp, tgt=tgt, cam_lens=35, fstop=4.0, focus_pts=("Right_grip",), key=100.0,
+            # behind his left shoulder: sees the right hand go to the quiver and bring the arrow forward
+            cp = M @ Vector((0.62 - 0.1 * ease(t / 7.0), 1.35, 1.78))
+            tgt = M @ Vector((-0.05, -0.45, 1.4))
+            st.update(cam=cp, tgt=tgt, cam_lens=30, fstop=4.0, focus_pts=("Right_grip",), key=100.0,
                       key_rel=Vector((0.6, -1.9, 2.0)))
         elif name in ("S09_orbit_draw", "S10_hero"):
             M = M_archer()(t)
